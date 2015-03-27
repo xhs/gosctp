@@ -1,1 +1,1 @@
-## Go bindings for usrsctp (work in progress).
+## Go bindings for some usrsctp functions (work in progress).
