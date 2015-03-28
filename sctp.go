@@ -136,6 +136,43 @@ static ssize_t send_data(sctp_transport *sctp,
   return usrsctp_sendv(sctp->sock, data, len, NULL, 0,
                        &info, sizeof info, SCTP_SENDV_SNDINFO, 0);
 }
+
+static int connect_sctp(sctp_transport *sctp, int port, void *udata) {
+  struct sockaddr_conn sconn;
+  memset(&sconn, 0, sizeof sconn);
+  sconn.sconn_family = AF_CONN;
+  sconn.sconn_port = htons(port);
+  sconn.sconn_addr = (void *)udata;
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__)
+  sconn.sconn_len = sizeof *udata;
+#endif
+  if (usrsctp_connect(sctp->sock, (struct sockaddr *)&sconn, sizeof sconn) < 0)
+    return -1;
+
+  return 0;
+}
+
+static int accept_sctp(sctp_transport *sctp, int port, void *udata) {
+  struct sockaddr_conn sconn;
+  memset(&sconn, 0, sizeof sconn);
+  sconn.sconn_family = AF_CONN;
+  sconn.sconn_port = htons(port);
+  sconn.sconn_addr = (void *)udata;
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__)
+  sconn.sconn_len = sizeof *udata;
+#endif
+  usrsctp_listen(sctp->sock, 1);
+  socklen_t len = sizeof sconn;
+  struct socket *s = usrsctp_accept(sctp->sock, (struct sockaddr *)&sconn, &len);
+  if (s) {
+    struct socket *t = sctp->sock;
+    sctp->sock = s;
+    usrsctp_close(t);
+    return 0;
+  }
+
+  return -1;
+}
 */
 import "C"
 
@@ -218,13 +255,37 @@ func (s *SctpTransport) SetNotificationReceivedCB(cb NotificationReceivedCB) {
 }
 
 func (s *SctpTransport) Feed(data []byte) {
+  s.mtx.Lock()
+  defer s.mtx.Unlock()
   C.usrsctp_conninput(s.sctp.udata, unsafe.Pointer(&data[0]), C.size_t(len(data)), 0)
 }
 
 func (s *SctpTransport) Send(data []byte, sid, ppid int) (int, error) {
+  s.mtx.Lock()
+  defer s.mtx.Unlock()
   rv := C.send_data(s.sctp, unsafe.Pointer(&data[0]), C.size_t(len(data)), C.uint16_t(sid), C.uint32_t(ppid))
   if rv < 0 {
     return 0, errors.New("failed to send data")
   }
   return int(rv), nil
+}
+
+func (s *SctpTransport) Connect(port int) error {
+  s.mtx.Lock()
+  defer s.mtx.Unlock()
+  rv := C.connect_sctp(s.sctp, C.int(port), s.sctp.udata)
+  if rv < 0 {
+    return errors.New("failed to connect SCTP transport")
+  }
+  return nil
+}
+
+func (s *SctpTransport) Accept() error {
+  s.mtx.Lock()
+  defer s.mtx.Unlock()
+  rv := C.accept_sctp(s.sctp, C.int(s.port), s.sctp.udata)
+  if rv < 0 {
+    return errors.New("failed to accept SCTP transport")
+  }
+  return nil
 }
