@@ -19,29 +19,26 @@ typedef struct {
   void *udata;
 } sctp_transport;
 
-extern void go_sctp_data_ready_cb(void *udata, void *data, size_t len);
-static int sctp_data_ready_cb(void *udata, void *data, size_t len, uint8_t tos, uint8_t set_df) {
-  go_sctp_data_ready_cb(udata, data, len);
+extern void go_sctp_data_ready_cb(sctp_transport *sctp, void *data, size_t len);
+static int sctp_data_ready_cb(void *addr, void *data, size_t len, uint8_t tos, uint8_t set_df) {
+  go_sctp_data_ready_cb((sctp_transport *)addr, data, len);
   return 0;
 }
 
-extern void go_sctp_data_received_cb(void *udata, void *data, size_t len, int sid, int ppid);
-extern void go_sctp_notification_received_cb(void *udata, void *data, size_t len);
+extern void go_sctp_data_received_cb(sctp_transport *sctp, void *data, size_t len, int sid, int ppid);
+extern void go_sctp_notification_received_cb(sctp_transport *sctp, void *data, size_t len);
 static int sctp_data_received_cb(struct socket *sock, union sctp_sockstore addr, void *data,
                                  size_t len, struct sctp_rcvinfo recv_info, int flags, void *udata) {
   if (flags & MSG_NOTIFICATION)
-    go_sctp_notification_received_cb(udata, data, len);
+    go_sctp_notification_received_cb((sctp_transport *)udata, data, len);
   else
-    go_sctp_data_received_cb(udata, data, len, recv_info.rcv_sid, ntohl(recv_info.rcv_ppid));
+    go_sctp_data_received_cb((sctp_transport *)udata, data, len, recv_info.rcv_sid, ntohl(recv_info.rcv_ppid));
 
   free(data);
   return 0;
 }
 
 static sctp_transport *new_sctp_transport(int port, void *udata) {
-  if (udata == NULL)
-    return NULL;
-
   sctp_transport *sctp = (sctp_transport *)calloc(1, sizeof *sctp);
   if (sctp == NULL)
     return NULL;
@@ -53,9 +50,9 @@ static sctp_transport *new_sctp_transport(int port, void *udata) {
   }
   g_sctp_ref++;
 
-  usrsctp_register_address(udata);
+  usrsctp_register_address(sctp);
   struct socket *s = usrsctp_socket(AF_CONN, SOCK_STREAM, IPPROTO_SCTP,
-                                    sctp_data_received_cb, NULL, 0, udata);
+                                    sctp_data_received_cb, NULL, 0, sctp);
   if (s == NULL)
     goto trans_err;
   sctp->sock = s;
@@ -137,14 +134,14 @@ static ssize_t send_data(sctp_transport *sctp,
                        &info, sizeof info, SCTP_SENDV_SNDINFO, 0);
 }
 
-static int connect_sctp(sctp_transport *sctp, int port, void *udata) {
+static int connect_sctp(sctp_transport *sctp, int port) {
   struct sockaddr_conn sconn;
   memset(&sconn, 0, sizeof sconn);
   sconn.sconn_family = AF_CONN;
   sconn.sconn_port = htons(port);
-  sconn.sconn_addr = (void *)udata;
+  sconn.sconn_addr = (void *)sctp;
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__)
-  sconn.sconn_len = sizeof *udata;
+  sconn.sconn_len = sizeof *sctp;
 #endif
   if (usrsctp_connect(sctp->sock, (struct sockaddr *)&sconn, sizeof sconn) < 0)
     return -1;
@@ -152,14 +149,14 @@ static int connect_sctp(sctp_transport *sctp, int port, void *udata) {
   return 0;
 }
 
-static int accept_sctp(sctp_transport *sctp, int port, void *udata) {
+static int accept_sctp(sctp_transport *sctp, int port) {
   struct sockaddr_conn sconn;
   memset(&sconn, 0, sizeof sconn);
   sconn.sconn_family = AF_CONN;
   sconn.sconn_port = htons(port);
-  sconn.sconn_addr = (void *)udata;
+  sconn.sconn_addr = (void *)sctp;
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__)
-  sconn.sconn_len = sizeof *udata;
+  sconn.sconn_len = sizeof *sctp;
 #endif
   usrsctp_listen(sctp->sock, 1);
   socklen_t len = sizeof sconn;
@@ -186,19 +183,18 @@ type SctpTransport struct {
   sctp *C.sctp_transport
   port int
   mtx sync.Mutex
-}
-
-type callbackData struct {
-  dataReadyCB, dataReceivedCB, notifReceivedCB interface{}
+  BytesToWrite chan []byte
 }
 
 func NewTransport(port int) (*SctpTransport, error) {
-  d := &callbackData{}
-  sctp := C.new_sctp_transport(C.int(port), unsafe.Pointer(d))
+  sctp := C.new_sctp_transport(C.int(port), nil)
   if sctp == nil {
     return nil, errors.New("failed to create SCTP transport")
   }
-  return &SctpTransport{sctp: sctp, port: port}, nil
+  s := &SctpTransport{sctp: sctp, port: port}
+  s.BytesToWrite = make(chan []byte)
+  sctp.udata = unsafe.Pointer(s)
+  return s, nil
 }
 
 func (s *SctpTransport) Destroy() {
@@ -210,54 +206,27 @@ func (s *SctpTransport) Destroy() {
   C.release_usrsctp()
 }
 
-type DataReadyCB func(data []byte)
-
 //export go_sctp_data_ready_cb
-func go_sctp_data_ready_cb(udata, data unsafe.Pointer, length C.size_t) {
-  d := (*callbackData)(udata)
+func go_sctp_data_ready_cb(sctp *C.sctp_transport, data unsafe.Pointer, length C.size_t) {
+  s := (*SctpTransport)(sctp.udata)
   b := C.GoBytes(data, C.int(length))
-  if d.dataReadyCB != nil {
-    d.dataReadyCB.(DataReadyCB)(b)
-  }
+  s.BytesToWrite <- b
 }
-
-func (s *SctpTransport) SetDataReadyCB(cb DataReadyCB) {
-  d := (*callbackData)(s.sctp.udata)
-  d.dataReadyCB = cb
-}
-
-type DataReceivedCB func(data []byte, sid, ppid int)
 
 //export go_sctp_data_received_cb
-func go_sctp_data_received_cb(udata, data unsafe.Pointer, length C.size_t, sid, ppid C.int) {
-  d := (*callbackData)(udata)
-  b := C.GoBytes(data, C.int(length))
-  if d.dataReceivedCB != nil {
-    d.dataReceivedCB.(DataReceivedCB)(b, int(sid), int(ppid))
-  }
-}
+func go_sctp_data_received_cb(sctp *C.sctp_transport, data unsafe.Pointer, length C.size_t, sid, ppid C.int) {
 
-func (s *SctpTransport) SetDataReceivedCB(cb DataReceivedCB) {
-  d := (*callbackData)(s.sctp.udata)
-  d.dataReceivedCB = cb
 }
-
-type NotificationReceivedCB func(data []byte)
 
 //export go_sctp_notification_received_cb
-func go_sctp_notification_received_cb(udata, data unsafe.Pointer, length C.size_t) {
+func go_sctp_notification_received_cb(sctp *C.sctp_transport, data unsafe.Pointer, length C.size_t) {
 
-}
-
-func (s *SctpTransport) SetNotificationReceivedCB(cb NotificationReceivedCB) {
-  d := (*callbackData)(s.sctp.udata)
-  d.notifReceivedCB = cb
 }
 
 func (s *SctpTransport) Feed(data []byte) {
   s.mtx.Lock()
   defer s.mtx.Unlock()
-  C.usrsctp_conninput(s.sctp.udata, unsafe.Pointer(&data[0]), C.size_t(len(data)), 0)
+  C.usrsctp_conninput(unsafe.Pointer(s.sctp), unsafe.Pointer(&data[0]), C.size_t(len(data)), 0)
 }
 
 func (s *SctpTransport) Send(data []byte, sid, ppid int) (int, error) {
@@ -271,9 +240,7 @@ func (s *SctpTransport) Send(data []byte, sid, ppid int) (int, error) {
 }
 
 func (s *SctpTransport) Connect(port int) error {
-  s.mtx.Lock()
-  defer s.mtx.Unlock()
-  rv := C.connect_sctp(s.sctp, C.int(port), s.sctp.udata)
+  rv := C.connect_sctp(s.sctp, C.int(port))
   if rv < 0 {
     return errors.New("failed to connect SCTP transport")
   }
@@ -281,9 +248,7 @@ func (s *SctpTransport) Connect(port int) error {
 }
 
 func (s *SctpTransport) Accept() error {
-  s.mtx.Lock()
-  defer s.mtx.Unlock()
-  rv := C.accept_sctp(s.sctp, C.int(s.port), s.sctp.udata)
+  rv := C.accept_sctp(s.sctp, C.int(s.port))
   if rv < 0 {
     return errors.New("failed to accept SCTP transport")
   }
