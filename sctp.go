@@ -3,19 +3,15 @@ package gosctp
 /*
 #cgo CFLAGS: -DINET -DINET6 -Wno-deprecated
 #cgo LDFLAGS: -lusrsctp -lpthread
-#cgo pkg-config: openssl
 
 #include <stdlib.h>
 #include <string.h>
 #include <usrsctp.h>
-#include <openssl/bio.h>
 
 static int g_sctp_ref = 0;
 
 typedef struct {
   struct socket *sock;
-  BIO *ibio;
-  BIO *obio;
   void *udata;
 } sctp_transport;
 
@@ -56,18 +52,6 @@ static sctp_transport *new_sctp_transport(int port, void *udata) {
   if (s == NULL)
     goto trans_err;
   sctp->sock = s;
-
-  BIO *bio = BIO_new(BIO_s_mem());
-  if (bio == NULL)
-    goto trans_err;
-  BIO_set_mem_eof_return(bio, -1);
-  sctp->ibio = bio;
-
-  bio = BIO_new(BIO_s_mem());
-  if (bio == NULL)
-    goto trans_err;
-  BIO_set_mem_eof_return(bio, -1);
-  sctp->obio = bio;
 
   struct linger lopt;
   lopt.l_onoff = 1;
@@ -200,8 +184,6 @@ func NewTransport(port int) (*SctpTransport, error) {
 func (s *SctpTransport) Destroy() {
   C.usrsctp_close(s.sctp.sock)
   C.usrsctp_deregister_address(unsafe.Pointer(s.sctp))
-  C.BIO_free_all(s.sctp.ibio)
-  C.BIO_free_all(s.sctp.obio)
   C.free(unsafe.Pointer(s.sctp))
   C.release_usrsctp()
 }
