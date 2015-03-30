@@ -163,11 +163,17 @@ import (
   "sync"
 )
 
+type SctpData struct {
+  Sid, Ppid int
+  Data []byte
+}
+
 type SctpTransport struct {
   sctp *C.sctp_transport
   port int
   mtx sync.Mutex
   BytesToWrite chan []byte
+  DataToRead chan *SctpData
 }
 
 func NewTransport(port int) (*SctpTransport, error) {
@@ -176,7 +182,8 @@ func NewTransport(port int) (*SctpTransport, error) {
     return nil, errors.New("failed to create SCTP transport")
   }
   s := &SctpTransport{sctp: sctp, port: port}
-  s.BytesToWrite = make(chan []byte)
+  s.BytesToWrite = make(chan []byte, 16)
+  s.DataToRead = make(chan *SctpData, 16)
   sctp.udata = unsafe.Pointer(s)
   return s, nil
 }
@@ -197,12 +204,15 @@ func go_sctp_data_ready_cb(sctp *C.sctp_transport, data unsafe.Pointer, length C
 
 //export go_sctp_data_received_cb
 func go_sctp_data_received_cb(sctp *C.sctp_transport, data unsafe.Pointer, length C.size_t, sid, ppid C.int) {
-
+  s := (*SctpTransport)(sctp.udata)
+  b := C.GoBytes(data, C.int(length))
+  d := &SctpData{int(sid), int(ppid), b}
+  s.DataToRead <- d
 }
 
 //export go_sctp_notification_received_cb
 func go_sctp_notification_received_cb(sctp *C.sctp_transport, data unsafe.Pointer, length C.size_t) {
-
+  // TODO: add interested events
 }
 
 func (s *SctpTransport) Feed(data []byte) {
