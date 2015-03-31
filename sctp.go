@@ -170,7 +170,7 @@ type SctpData struct {
 
 type SctpTransport struct {
   sctp *C.sctp_transport
-  port int
+  Port int
   mtx sync.Mutex
   BytesToWrite chan []byte
   DataToRead chan *SctpData
@@ -181,7 +181,7 @@ func NewTransport(port int) (*SctpTransport, error) {
   if sctp == nil {
     return nil, errors.New("failed to create SCTP transport")
   }
-  s := &SctpTransport{sctp: sctp, port: port}
+  s := &SctpTransport{sctp: sctp, Port: port}
   s.BytesToWrite = make(chan []byte, 16)
   s.DataToRead = make(chan *SctpData, 16)
   sctp.udata = unsafe.Pointer(s)
@@ -240,7 +240,7 @@ func (s *SctpTransport) Connect(port int) error {
 }
 
 func (s *SctpTransport) Accept() error {
-  rv := C.accept_sctp(s.sctp, C.int(s.port))
+  rv := C.accept_sctp(s.sctp, C.int(s.Port))
   if rv < 0 {
     return errors.New("failed to accept SCTP transport")
   }
