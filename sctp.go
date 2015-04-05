@@ -172,8 +172,8 @@ type SctpTransport struct {
   sctp *C.sctp_transport
   Port int
   mtx sync.Mutex
-  BytesToWrite chan []byte
-  DataToRead chan *SctpData
+  BufferChannel chan []byte
+  DataChannel chan *SctpData
 }
 
 func NewTransport(port int) (*SctpTransport, error) {
@@ -182,8 +182,8 @@ func NewTransport(port int) (*SctpTransport, error) {
     return nil, errors.New("failed to create SCTP transport")
   }
   s := &SctpTransport{sctp: sctp, Port: port}
-  s.BytesToWrite = make(chan []byte, 16)
-  s.DataToRead = make(chan *SctpData, 16)
+  s.BufferChannel = make(chan []byte, 16)
+  s.DataChannel = make(chan *SctpData, 16)
   sctp.udata = unsafe.Pointer(s)
   return s, nil
 }
@@ -199,7 +199,7 @@ func (s *SctpTransport) Destroy() {
 func go_sctp_data_ready_cb(sctp *C.sctp_transport, data unsafe.Pointer, length C.size_t) {
   s := (*SctpTransport)(sctp.udata)
   b := C.GoBytes(data, C.int(length))
-  s.BytesToWrite <- b
+  s.BufferChannel <- b
 }
 
 //export go_sctp_data_received_cb
@@ -207,7 +207,7 @@ func go_sctp_data_received_cb(sctp *C.sctp_transport, data unsafe.Pointer, lengt
   s := (*SctpTransport)(sctp.udata)
   b := C.GoBytes(data, C.int(length))
   d := &SctpData{int(sid), int(ppid), b}
-  s.DataToRead <- d
+  s.DataChannel <- d
 }
 
 //export go_sctp_notification_received_cb
